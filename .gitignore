@@ -175,8 +175,13 @@ pyrightconfig.json
 
 # End of https://www.toptal.com/developers/gitignore/api/python
 
+# Exist-Util specific files
+
 # API tokens
 secrets.json
 
 # Private config
 config.json
+
+# Local state
+.last_sync_date

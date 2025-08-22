@@ -69,12 +69,13 @@ def update_attributes(updates):
             data = response.json()
             print("Error:", data)
 
-def create_attribute(label, value_type, group, manual):
+def create_attribute(label, value_type, group, subgroup, manual):
     # make the json string to send to Exist
     body = json.dumps([
         {'label': label,
          'value_type': value_type,
          'group': group,
+         'subgroup' : subgroup,
          'manual': manual
         }])
 

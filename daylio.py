@@ -9,19 +9,60 @@ from dataclasses import dataclass
 import datetime
 import json
 import sys
-from typing import List
+from typing import List, Optional
+from pathlib import Path
 
 import exist_client
 
 CONFIG = json.load(open('config.json'))
 
-MOOD_RATING_MAP = {
-    "awful" : 1,
-    "bad" : 2,
-    "meh" : 3,
-    "good" : 4,
-    "rad" : 5
+# Default Daylio mood name to rating mapping. Can be overridden in config.json
+# by providing a key "mood_rating_map" with the same structure.
+DEFAULT_MOOD_RATING_MAP = {
+    "awful": 1,
+    "bad": 3,
+    "meh": 5,
+    "good": 7,
+    "rad": 9,
 }
+
+MOOD_RATING_MAP = CONFIG.get('mood_rating_map', DEFAULT_MOOD_RATING_MAP)
+
+# Activity groups mapping (group -> list of activity names) loaded from config.
+GROUP_CONFIG = CONFIG.get('activity_groups', {})
+
+# Inverted mapping: activity name -> group name, used when creating attributes.
+ACTIVITY_TO_GROUP = {}
+for _group, _activities in GROUP_CONFIG.items():
+    for _activity in _activities:
+        if _activity in ACTIVITY_TO_GROUP and ACTIVITY_TO_GROUP[_activity] != _group:
+            print(f"Warning: Activity '{_activity}' appears in multiple groups ('{ACTIVITY_TO_GROUP[_activity]}' and '{_group}'). Using first.", file=sys.stderr)
+            continue
+        ACTIVITY_TO_GROUP[_activity] = _group
+
+GLOBAL_ACTIVITY_LIST = set()
+
+LAST_SYNC_FILE = '.last_sync_date'
+
+def read_last_sync_date() -> Optional[datetime.date]:
+    """Reads the last sync date from disk if present."""
+    p = Path(LAST_SYNC_FILE)
+    if not p.exists():
+        return None
+    try:
+        content = p.read_text().strip()
+        if not content:
+            return None
+        return datetime.date.fromisoformat(content)
+    except Exception as e:
+        print(f"Warning: Couldn't read last sync date ('{e}'), ignoring.", file=sys.stderr)
+        return None
+
+def write_last_sync_date(d: datetime.date):
+    try:
+        Path(LAST_SYNC_FILE).write_text(d.isoformat())
+    except Exception as e:
+        print(f"Warning: Failed to write last sync date ('{e}').", file=sys.stderr)
 
 @dataclass
 class DaylioEntry:
@@ -30,11 +71,9 @@ class DaylioEntry:
     """
     date: datetime.date
     mood_name: str
-    mood_rating: int
+    mood_rating: Optional[int]
     activities: List[str]
     note: str
-
-GLOBAL_ACTIVITY_LIST = set()
 
 def import_daylio_csv(file_path: str) -> List[DaylioEntry]:
     """
@@ -46,24 +85,28 @@ def import_daylio_csv(file_path: str) -> List[DaylioEntry]:
         for row in reader:
             date = datetime.date.fromisoformat(row['full_date'])
             mood_name = row['mood']
-            mood_rating = MOOD_RATING_MAP.get(row['mood'], -1)
+            if mood_name in MOOD_RATING_MAP:
+                mood_rating = MOOD_RATING_MAP[mood_name]
+            else:
+                print(f"Warning: Unmapped mood '{mood_name}' on {date}, skipping mood for that day.", file=sys.stderr)
+                mood_rating = None
+
             activities = row['activities'].split(' | ')
 
             # Removed activities that are filtered in the config
             activities = [activity for activity in activities if activity not in CONFIG['filter_activities']]
             GLOBAL_ACTIVITY_LIST.update(set(activities))
+            GLOBAL_ACTIVITY_LIST.discard('') # Remove spurious empty activities
 
             note = row['note']
             entry = DaylioEntry(date, mood_name, mood_rating, activities, note)
             entries.append(entry)
     return entries
 
-def daylio_mood_to_exist(daylio_mood_rating : int):
-    return (daylio_mood_rating * 2) - 1
-
 def create_activity_tags():
     for activity in GLOBAL_ACTIVITY_LIST:
-        exist_client.create_attribute(activity, exist_client.ValueType.BOOLEAN, 'custom', False)
+        group = ACTIVITY_TO_GROUP.get(activity, '')
+        exist_client.create_attribute(activity, exist_client.ValueType.BOOLEAN, 'custom', group, False)
 
 parser = argparse.ArgumentParser(description =
     "Import Daylio journal entries from an exported CSV file, and optionally sync them to Exist.io.")
@@ -73,19 +116,47 @@ parser.add_argument('--sync-moods', action='store_true', help='Sync moods Exist.
 parser.add_argument('--sync-activities', action='store_true', help='Sync activities to Exist.io.')
 parser.add_argument('--create-activity-tags', action='store_true', help='Create custom attributes for each activity.')
 parser.add_argument('--dry-run', '-d', action='store_true', help='Instead of syncing, print a preview of what would be synced.')
+parser.add_argument('--since', '--since-date', dest='since_date', type=str,
+    help='Only sync entries on or after this date (YYYY-MM-DD). Overrides stored last sync date if provided.')
 
 def main():
     args = parser.parse_args()
     entries = import_daylio_csv(args.file_path)
 
+    # Determine effective since date (CLI override > stored last sync)
+    since_date: Optional[datetime.date] = None
+    if args.since_date:
+        try:
+            since_date = datetime.date.fromisoformat(args.since_date)
+        except ValueError:
+            print(f"Error: --since date '{args.since_date}' is not valid ISO format YYYY-MM-DD", file=sys.stderr)
+            sys.exit(1)
+    else:
+        since_date = read_last_sync_date()
+
+    if since_date:
+        entries = [e for e in entries if e.date >= since_date]
+        if not entries:
+            print("No entries to process after since date.")
+            return
+
     if args.sync_moods:
-        updates = [exist_client.make_update('mood', entry.date.isoformat(), daylio_mood_to_exist(entry.mood_rating)) for entry in entries]
+        mood_entries = [entry for entry in entries if entry.mood_rating is not None]
+        updates = [
+            exist_client.make_update('mood', entry.date.isoformat(), entry.mood_rating)
+            for entry in mood_entries
+        ]
         if args.dry_run:
             print(f"{len(updates)} updates to sync, showing first 5:")
-            for i in range(5):
+            for i in range(min(5, len(updates))):
                 print(updates[i])
         else:
-            exist_client.update_attributes(updates)
+            if updates:
+                exist_client.update_attributes(updates)
+                # Update last sync date to the max date among processed entries
+                write_last_sync_date(max(e.date for e in mood_entries))
+            else:
+                print("No mood updates to sync.")
     elif args.create_activity_tags:
         if args.dry_run:
             print("Activites to create: ", GLOBAL_ACTIVITY_LIST)
@@ -97,19 +168,19 @@ def main():
             for activity in entry.activities:
                 if activity == '':
                     continue
-                activity = activity.replace(' ', '_')
-                activity = activity.replace('/', '')
-                activity = activity.replace('&', '')
-                activity = activity.replace('(', '')
-                activity = activity.replace(')', '')
-                updates.append(exist_client.make_update(activity, entry.date.isoformat(), True))
+                activity_norm = activity.replace(' ', '_').replace('/', '').replace('&', '').replace('(', '').replace(')', '')
+                updates.append(exist_client.make_update(activity_norm, entry.date.isoformat(), True))
 
         if args.dry_run:
             print(f"{len(updates)} updates to sync, showing first 5:")
-            for i in range(5):
+            for i in range(min(5, len(updates))):
                 print(updates[i])
         else:
-            exist_client.update_attributes(updates)
+            if updates:
+                exist_client.update_attributes(updates)
+                write_last_sync_date(max(e.date for e in entries))
+            else:
+                print("No activity updates to sync.")
 
 
 if __name__ == '__main__':

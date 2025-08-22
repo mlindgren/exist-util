@@ -79,25 +79,7 @@ python daylio.py <file_path> [options]
 
 ## Configuration
 
-### secrets.json
+- **`secrets.json`** contains client secrets necessary to use the Exist API.
+- **`config.json`** contains configuration for filtering hidden activities and specifying which groups activities belong to.
 
-This file contains your Exist.io API credentials. Example:
-
-```json
-{
-    "clientId": "your-client-id",
-    "clientSecret": "your-client-secret",
-    "developerAccessToken": "your-access-token",
-    "developerRefreshToken": "your-refresh-token"
-}
-```
-
-### config.json
-
-This specifies activities to filter out during import. Example:
-
-```json
-{
-    "filter_activities": ["secret_activity"]
-}
-```
+See the corresponding `secrets.sample.json` and `config.sample.json` files for examples.

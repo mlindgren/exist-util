@@ -1,3 +1,14 @@
 {
-    "filter_activities" : ["secret_activity"]
+    "filter_activities" : ["secret_activity"],
+    "mood_rating_map": {
+        "awful": 1,
+        "bad": 3,
+        "meh": 5,
+        "good": 7,
+        "rad": 9
+    },
+    "activity_groups": {
+        "Exercise": ["Running", "Cycling"],
+        "Social": ["Friends", "Family"]
+    }
 }
