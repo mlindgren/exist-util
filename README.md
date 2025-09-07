@@ -8,11 +8,12 @@ The name of the repository, `exist-util`, is generic because I might add more ut
 
 ## Features
 
-- Import Daylio journal entries from exported CSV files.
-- Filter activities based on a configurable list.
-- Sync moods and activities to Exist.io.
-- Create custom attributes for activities in Exist.io.
-- Dry-run mode for previewing changes before syncing.
+- Import Daylio journal entries from exported CSV files
+- Configurable mood rating mapping (can override default values in config)
+- Filter activities based on a configurable list
+- Organize activities into custom groups for better categorization in Exist.io
+- Incremental sync: only process entries since the last successful sync
+- Dry-run mode for previewing changes before syncing
 
 ## Requirements
 
@@ -55,27 +56,27 @@ python daylio.py <file_path> [options]
 
 ### Optional Arguments
 
-- `--sync-moods`: Sync moods to Exist.io.
-- `--sync-activities`: Sync activities to Exist.io.
-- `--create-activity-tags`: Create custom attributes for each activity in Exist.io. (You must do this before syncing activities for the first time.)
 - `--dry-run`, `-d`: Preview the changes without syncing.
+- `--since SINCE_DATE`, `--since-date SINCE_DATE`: Only sync entries on or after this date (YYYY-MM-DD). Overrides stored last sync date if provided.
 
 ### Example Commands
 
-1. Import a Daylio CSV file and sync moods:
+1. **Full sync** (recommended - does everything automatically):
    ```bash
-   python daylio.py daylio_export.csv --sync-moods
+   python daylio.py daylio_export.csv
    ```
 
-2. Create custom attributes for activities:
+2. **Dry run** to see what would be synced:
    ```bash
-   python daylio.py daylio_export.csv --create-activity-tags
+   python daylio.py daylio_export.csv --dry-run
    ```
 
-3. Sync activities with a dry run:
+3. **Sync only recent entries** since a specific date:
    ```bash
-   python daylio.py daylio_export.csv --sync-activities --dry-run
+   python daylio.py daylio_export.csv --since 2024-01-01
    ```
+
+The script automatically tracks the last successful sync date in `.last_sync_date`. On subsequent runs, only entries from that date forward will be processed. Use `--since` to override this behavior.
 
 ## Configuration
 
@@ -83,3 +84,9 @@ python daylio.py <file_path> [options]
 - **`config.json`** contains configuration for filtering hidden activities and specifying which groups activities belong to.
 
 See the corresponding `secrets.sample.json` and `config.sample.json` files for examples.
+
+### Configuration Options
+
+- **`filter_activities`**: List of activity names to exclude from sync
+- **`mood_rating_map`**: Override default Daylio mood name to numeric rating mapping. If omitted, defaults are used. Unmapped moods are skipped with warnings.
+- **`activity_groups`**: Map activity names to Exist.io attribute groups for better organization. Activities not listed default to the "custom" group.
