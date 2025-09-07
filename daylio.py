@@ -64,6 +64,15 @@ def write_last_sync_date(d: datetime.date):
     except Exception as e:
         print(f"Warning: Failed to write last sync date ('{e}').", file=sys.stderr)
 
+def normalize_activity_name(activity: str) -> str:
+    """Normalize activity name for Exist.io attribute creation/updates"""
+    return (activity.replace(' ', '_')
+                    .replace('/', '')
+                    .replace('&', '')
+                    .replace('(', '')
+                    .replace(')', '')
+                    .lower())
+
 @dataclass
 class DaylioEntry:
     """
@@ -108,13 +117,108 @@ def create_activity_tags():
         group = ACTIVITY_TO_GROUP.get(activity, '')
         exist_client.create_attribute(activity, exist_client.ValueType.BOOLEAN, 'custom', group, False)
 
+def get_missing_activity_attributes(activities):
+    """Check which activity attributes don't exist yet in Exist.io"""
+    # Normalize activity names same way as in sync
+    normalized_activities = []
+    for activity in activities:
+        if activity == '':
+            continue
+        activity_norm = normalize_activity_name(activity)
+        normalized_activities.append(activity_norm)
+    
+    # If no activities, skip the API call
+    if not normalized_activities:
+        return []
+    
+    # Get existing attributes with limit set to double the number of unique activity names.
+    # This is to handle the case where there are more activity tags in the user's Exist account
+    # than there are Daylio activities, which could happen if the user deleted or renamed activities
+    # in Daylio.
+    limit = len(normalized_activities) * 2
+    existing_attrs = exist_client.list_attributes(limit=limit)
+    existing_names = {attr['name'] for attr in existing_attrs}
+    
+    missing = [activity for activity in normalized_activities if activity not in existing_names]
+    return missing
+
+def sync_all(entries, dry_run=False):
+    """Perform complete sync: create missing attributes, sync moods, sync activities"""
+    print("Starting comprehensive sync...")
+    
+    # Step 1: Check and create missing activity attributes
+    print("\n1. Checking activity attributes...")
+    all_activities = set()
+    for entry in entries:
+        all_activities.update(entry.activities)
+    
+    missing_attrs = get_missing_activity_attributes(all_activities)
+    if missing_attrs:
+        print(f"   Found {len(missing_attrs)} missing activity attributes: {missing_attrs}")
+        if dry_run:
+            print("   [DRY RUN] Would create missing attributes: {}".format(missing_attrs))
+        else:
+            print("   Creating missing attributes...")
+            for activity in missing_attrs:
+                group = ACTIVITY_TO_GROUP.get(activity, 'custom')
+                exist_client.create_attribute(activity, exist_client.ValueType.BOOLEAN, group, '', False)
+    else:
+        print("   All activity attributes already exist")
+    
+    # Step 2: Sync moods
+    print("\n2. Syncing moods...")
+    mood_entries = [entry for entry in entries if entry.mood_rating is not None]
+    mood_updates = [
+        exist_client.make_update('mood', entry.date.isoformat(), entry.mood_rating)
+        for entry in mood_entries
+    ]
+    
+    if mood_updates:
+        print(f"   Found {len(mood_updates)} mood entries to sync")
+        if dry_run:
+            print("   [DRY RUN] Would sync moods, showing first 5:")
+            for i in range(min(5, len(mood_updates))):
+                print(f"     {mood_updates[i]}")
+        else:
+            print("   Syncing moods...")
+            exist_client.update_attributes(mood_updates)
+    else:
+        print("   No mood entries to sync")
+    
+    # Step 3: Sync activities
+    print("\n3. Syncing activities...")
+    activity_updates = []
+    for entry in entries:
+        for activity in entry.activities:
+            if activity == '':
+                continue
+            activity_norm = normalize_activity_name(activity)
+            activity_updates.append(exist_client.make_update(activity_norm, entry.date.isoformat(), True))
+    
+    if activity_updates:
+        print(f"   Found {len(activity_updates)} activity entries to sync")
+        if dry_run:
+            print("   [DRY RUN] Would sync activities, showing first 5:")
+            for i in range(min(5, len(activity_updates))):
+                print(f"     {activity_updates[i]}")
+        else:
+            print("   Syncing activities...")
+            exist_client.update_attributes(activity_updates)
+    else:
+        print("   No activity entries to sync")
+    
+    # Step 4: Update last sync date
+    if not dry_run and (mood_updates or activity_updates):
+        latest_date = max(e.date for e in entries)
+        print(f"\n4. Updating last sync date to {latest_date}")
+        write_last_sync_date(latest_date)
+    
+    print("\nSync complete!")
+
 parser = argparse.ArgumentParser(description =
     "Import Daylio journal entries from an exported CSV file, and optionally sync them to Exist.io.")
 
 parser.add_argument('file_path', type=str, help='Path to the Daylio CSV file to import.')
-parser.add_argument('--sync-moods', action='store_true', help='Sync moods Exist.io.')
-parser.add_argument('--sync-activities', action='store_true', help='Sync activities to Exist.io.')
-parser.add_argument('--create-activity-tags', action='store_true', help='Create custom attributes for each activity.')
 parser.add_argument('--dry-run', '-d', action='store_true', help='Instead of syncing, print a preview of what would be synced.')
 parser.add_argument('--since', '--since-date', dest='since_date', type=str,
     help='Only sync entries on or after this date (YYYY-MM-DD). Overrides stored last sync date if provided.')
@@ -139,49 +243,9 @@ def main():
         if not entries:
             print("No entries to process after since date.")
             return
-
-    if args.sync_moods:
-        mood_entries = [entry for entry in entries if entry.mood_rating is not None]
-        updates = [
-            exist_client.make_update('mood', entry.date.isoformat(), entry.mood_rating)
-            for entry in mood_entries
-        ]
-        if args.dry_run:
-            print(f"{len(updates)} updates to sync, showing first 5:")
-            for i in range(min(5, len(updates))):
-                print(updates[i])
-        else:
-            if updates:
-                exist_client.update_attributes(updates)
-                # Update last sync date to the max date among processed entries
-                write_last_sync_date(max(e.date for e in mood_entries))
-            else:
-                print("No mood updates to sync.")
-    elif args.create_activity_tags:
-        if args.dry_run:
-            print("Activites to create: ", GLOBAL_ACTIVITY_LIST)
-        else:
-            create_activity_tags()
-    elif args.sync_activities:
-        updates = []
-        for entry in entries:
-            for activity in entry.activities:
-                if activity == '':
-                    continue
-                activity_norm = activity.replace(' ', '_').replace('/', '').replace('&', '').replace('(', '').replace(')', '')
-                updates.append(exist_client.make_update(activity_norm, entry.date.isoformat(), True))
-
-        if args.dry_run:
-            print(f"{len(updates)} updates to sync, showing first 5:")
-            for i in range(min(5, len(updates))):
-                print(updates[i])
-        else:
-            if updates:
-                exist_client.update_attributes(updates)
-                write_last_sync_date(max(e.date for e in entries))
-            else:
-                print("No activity updates to sync.")
-
+    
+    # Run comprehensive sync by default
+    sync_all(entries, dry_run = args.dry_run)
 
 if __name__ == '__main__':
     main()

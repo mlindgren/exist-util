@@ -101,3 +101,22 @@ def create_attribute(label, value_type, group, subgroup, manual):
         # print the error if something went wrong
         data = response.json()
         print("Error:", data)
+
+def list_attributes(limit=None):
+    """Get list of all user attributes from Exist.io"""
+    url = "https://exist.io/api/2/attributes/?owned=true&groups=custom"
+    if limit:
+        url += f"&limit={limit}"
+    
+    response = requests.get(url,
+        headers={
+            "Authorization": f"Bearer {SECRETS['developerAccessToken']}",
+            "Content-type": "application/json"
+        })
+    
+    if response.status_code == 200:
+        data = response.json()
+        return data.get('results', [])
+    else:
+        print("Error fetching attributes:", response.json())
+        return []
